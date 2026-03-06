@@ -26,6 +26,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,6 +45,8 @@ import kotlinx.coroutines.delay
 
 private const val STREAMING_FRAME_LOG_TAG = "StreamingFrameMetrics"
 private const val HEADER_COLLAPSE_ANIMATION_MS = 220
+private const val HEADER_COLLAPSE_THRESHOLD_DP = 48
+private const val HEADER_EXPAND_THRESHOLD_DP = 24
 
 internal data class ChatCallbacks(
     val onToggleToolExpansion: (String) -> Unit,
@@ -447,10 +450,16 @@ private fun rememberHeaderControlsVisible(
     isRunActive: Boolean,
     isTimelineEmpty: Boolean,
 ): Boolean {
+    val density = LocalDensity.current
+    val collapseThresholdPx = remember(density) { with(density) { HEADER_COLLAPSE_THRESHOLD_DP.dp.roundToPx() } }
+    val expandThresholdPx = remember(density) { with(density) { HEADER_EXPAND_THRESHOLD_DP.dp.roundToPx() } }
+
     // Track previous scroll position to detect direction
     var previousIndex by remember { mutableIntStateOf(0) }
     var previousOffset by remember { mutableIntStateOf(0) }
     var controlsVisible by remember { mutableStateOf(true) }
+    var accumulatedScrollPx by remember { mutableIntStateOf(0) }
+    var lastScrollDeltaSign by remember { mutableIntStateOf(0) }
 
     val isAtTop by remember {
         derivedStateOf {
@@ -464,6 +473,8 @@ private fun rememberHeaderControlsVisible(
         LaunchedEffect(isRunActive, isTimelineEmpty, isAtTop) {
             previousIndex = listState.firstVisibleItemIndex
             previousOffset = listState.firstVisibleItemScrollOffset
+            accumulatedScrollPx = 0
+            lastScrollDeltaSign = 0
             controlsVisible = true
         }
         return true
@@ -474,15 +485,37 @@ private fun rememberHeaderControlsVisible(
     val currentOffset = listState.firstVisibleItemScrollOffset
 
     LaunchedEffect(currentIndex, currentOffset) {
-        val scrollingDown = currentIndex > previousIndex ||
-            (currentIndex == previousIndex && currentOffset > previousOffset)
-        val scrollingUp = currentIndex < previousIndex ||
-            (currentIndex == previousIndex && currentOffset < previousOffset)
+        val deltaPx =
+            when {
+                currentIndex == previousIndex -> currentOffset - previousOffset
+                currentIndex > previousIndex -> Int.MAX_VALUE
+                else -> Int.MIN_VALUE
+            }
 
-        if (scrollingDown) {
-            controlsVisible = false
-        } else if (scrollingUp) {
-            controlsVisible = true
+        val deltaSign = deltaPx.compareTo(0)
+        if (deltaSign != 0) {
+            if (deltaSign != lastScrollDeltaSign) {
+                accumulatedScrollPx = 0
+                lastScrollDeltaSign = deltaSign
+            }
+
+            accumulatedScrollPx +=
+                when (deltaPx) {
+                    Int.MAX_VALUE, Int.MIN_VALUE -> collapseThresholdPx
+                    else -> kotlin.math.abs(deltaPx)
+                }
+
+            when {
+                deltaSign > 0 && controlsVisible && accumulatedScrollPx >= collapseThresholdPx -> {
+                    controlsVisible = false
+                    accumulatedScrollPx = 0
+                }
+
+                deltaSign < 0 && !controlsVisible && accumulatedScrollPx >= expandThresholdPx -> {
+                    controlsVisible = true
+                    accumulatedScrollPx = 0
+                }
+            }
         }
 
         previousIndex = currentIndex
